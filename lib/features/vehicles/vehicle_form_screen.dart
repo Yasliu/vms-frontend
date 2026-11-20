@@ -8,9 +8,9 @@ import '../../core/widgets/app_button.dart';
 import '../../core/widgets/fade_slide_in.dart';
 import '../../core/widgets/form_section.dart';
 import '../../core/widgets/page_header.dart';
-import '../../data/mock_vehicles.dart';
-import '../../data/vehicle_repository.dart';
+import '../../core/network/api_exception.dart';
 import '../../models/vehicle.dart';
+import 'vehicle_scope.dart';
 import 'widgets/vehicle_visuals.dart';
 
 /// Used for both registering a new vehicle and editing an existing one.
@@ -24,17 +24,40 @@ class VehicleFormScreen extends StatefulWidget {
 }
 
 class _VehicleFormScreenState extends State<VehicleFormScreen> {
-  static final _numberPattern = RegExp(r'^[A-Z0-9][A-Z0-9 \-]{1,11}$');
+  // Same limits as the backend's request validation.
+  static const _maxNumber = 30;
+  static const _maxCompany = 100;
+  static const _maxShort = 50;
+
+  static const _fieldsShown = {
+    'vehicleNumber',
+    'company',
+    'type',
+    'brand',
+    'model',
+  };
+
+  static const _typeSuggestions = [
+    'Car',
+    'Van',
+    'Truck',
+    'Trailer',
+    'Forklift',
+  ];
 
   final _formKey = GlobalKey<FormState>();
   late final TextEditingController _number;
+  late final TextEditingController _company;
+  late final TextEditingController _type;
   late final TextEditingController _brand;
   late final TextEditingController _model;
-  String? _company;
-  VehicleType? _type;
   late VehicleStatus _status;
   bool _saving = false;
   bool _showErrorSummary = false;
+
+  // Problems reported by the server, shown until the field is edited.
+  Map<String, String> _serverErrors = {};
+  String? _submitError;
 
   bool get _isEdit => widget.vehicle != null;
 
@@ -43,48 +66,59 @@ class _VehicleFormScreenState extends State<VehicleFormScreen> {
     super.initState();
     final v = widget.vehicle;
     _number = TextEditingController(text: v?.vehicleNumber);
+    _company = TextEditingController(text: v?.company);
+    _type = TextEditingController(text: v?.type);
     _brand = TextEditingController(text: v?.brand);
     _model = TextEditingController(text: v?.model);
-    _company = v?.company;
-    _type = v?.type;
-    _status = v?.status ?? VehicleStatus.available;
+    _status = v?.status ?? VehicleStatus.active;
   }
 
   @override
   void dispose() {
     _number.dispose();
+    _company.dispose();
+    _type.dispose();
     _brand.dispose();
     _model.dispose();
     super.dispose();
   }
 
-  String? _validateNumber(String? value) {
-    final text = (value ?? '').trim().toUpperCase();
-    if (text.isEmpty) return 'Enter the vehicle number, for example AB 12345.';
-    if (!_numberPattern.hasMatch(text)) {
-      return 'Use 2–12 letters, numbers, spaces or hyphens.';
-    }
-    if (VehicleRepository.instance.isNumberTaken(
-      text,
-      exceptId: widget.vehicle?.id,
-    )) {
-      return 'This vehicle number is already registered.';
-    }
-    return null;
-  }
-
-  String? Function(String?) _validateText(String field, String example) {
+  /// Required + max length, then any message the server gave for this field.
+  String? Function(String?) _validator(
+    String field,
+    String label,
+    int max, {
+    String? example,
+  }) {
     return (value) {
       final text = (value ?? '').trim();
       if (text.isEmpty) {
-        return 'Enter the vehicle $field, for example $example.';
+        return example == null
+            ? 'Enter the $label.'
+            : 'Enter the $label, for example $example.';
       }
-      if (text.length > 40) return 'Keep the $field under 40 characters.';
-      return null;
+      if (text.length > max) {
+        return 'Use $max characters or fewer for the $label.';
+      }
+      return _serverErrors[field];
     };
   }
 
+  void _clearServerError(String field) {
+    if (_serverErrors.containsKey(field) || _submitError != null) {
+      setState(() {
+        _serverErrors = {..._serverErrors}..remove(field);
+        _submitError = null;
+      });
+    }
+  }
+
   Future<void> _save() async {
+    if (_saving) return;
+    setState(() {
+      _serverErrors = {};
+      _submitError = null;
+    });
     if (!_formKey.currentState!.validate()) {
       setState(() => _showErrorSummary = true);
       return;
@@ -93,35 +127,54 @@ class _VehicleFormScreenState extends State<VehicleFormScreen> {
       _showErrorSummary = false;
       _saving = true;
     });
-    await Future<void>.delayed(const Duration(milliseconds: 800));
-    if (!mounted) return;
 
-    final repository = VehicleRepository.instance;
-    final vehicle = Vehicle(
-      id: widget.vehicle?.id ?? repository.nextId(),
-      vehicleNumber: _number.text.trim().toUpperCase(),
-      company: _company!,
-      type: _type!,
+    final controller = VehicleScope.of(context);
+    final messenger = ScaffoldMessenger.of(context);
+    final navigator = Navigator.of(context);
+    final input = VehicleInput(
+      // The server normalizes the number (case, spacing); the form just trims.
+      vehicleNumber: _number.text.trim(),
+      company: _company.text.trim(),
+      type: _type.text.trim(),
       brand: _brand.text.trim(),
       model: _model.text.trim(),
       status: _status,
     );
-    if (_isEdit) {
-      repository.update(vehicle);
-    } else {
-      repository.add(vehicle);
-    }
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          _isEdit
-              ? '${vehicle.vehicleNumber} updated'
-              : '${vehicle.vehicleNumber} registered',
+    try {
+      final saved = _isEdit
+          ? await controller.update(widget.vehicle!.id, input)
+          : await controller.create(input);
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(
+            _isEdit
+                ? '${saved.vehicleNumber} updated'
+                : '${saved.vehicleNumber} registered',
+          ),
         ),
-      ),
-    );
-    Navigator.of(context).pop();
+      );
+      navigator.pop();
+    } on ApiException catch (e) {
+      // The vehicle was deleted elsewhere: the list we hold is stale.
+      if (_isEdit && e.kind == ApiErrorKind.notFound) controller.load();
+      if (!mounted) return;
+      // Field errors appear under their fields; anything else (or a field
+      // this form does not show) goes in the banner.
+      final elsewhere = e.fieldErrors.entries
+          .where((entry) => !_fieldsShown.contains(entry.key))
+          .map((entry) => entry.value);
+      final onFields = e.fieldErrors.keys.any(_fieldsShown.contains);
+      setState(() {
+        _saving = false;
+        _serverErrors = e.fieldErrors;
+        _submitError = e.fieldErrors.isEmpty
+            ? e.message
+            : (elsewhere.isEmpty ? null : elsewhere.join(' '));
+        _showErrorSummary = onFields;
+      });
+      if (onFields) _formKey.currentState!.validate();
+    }
   }
 
   @override
@@ -174,6 +227,33 @@ class _VehicleFormScreenState extends State<VehicleFormScreen> {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         AnimatedCollapse(
+          visible: _submitError != null,
+          child: Container(
+            color: scheme.errorContainer,
+            padding: const EdgeInsets.symmetric(
+              horizontal: AppSpacing.lg,
+              vertical: AppSpacing.md - 4,
+            ),
+            child: Row(
+              children: [
+                Icon(Icons.error_outline, color: scheme.onErrorContainer),
+                const SizedBox(width: AppSpacing.sm + 4),
+                Expanded(
+                  child: Semantics(
+                    liveRegion: true,
+                    child: Text(
+                      'Could not save the vehicle. ${_submitError ?? ''}',
+                      style: theme.textTheme.bodyMedium?.copyWith(
+                        color: scheme.onErrorContainer,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        AnimatedCollapse(
           visible: _showErrorSummary,
           child: Container(
             color: scheme.errorContainer,
@@ -213,35 +293,36 @@ class _VehicleFormScreenState extends State<VehicleFormScreen> {
                   textCapitalization: TextCapitalization.characters,
                   textInputAction: TextInputAction.next,
                   inputFormatters: [
-                    FilteringTextInputFormatter.allow(
-                      RegExp(r'[A-Za-z0-9 \-]'),
-                    ),
-                    LengthLimitingTextInputFormatter(12),
+                    LengthLimitingTextInputFormatter(_maxNumber),
                   ],
+                  onChanged: (_) => _clearServerError('vehicleNumber'),
                   decoration: const InputDecoration(
                     labelText: 'Vehicle number *',
                     hintText: 'AB 12345',
-                    helperText: 'Letters, numbers, spaces or hyphens',
+                    helperText: 'Must be unique',
                     prefixIcon: Icon(Icons.pin_outlined),
                   ),
-                  validator: _validateNumber,
+                  validator: _validator(
+                    'vehicleNumber',
+                    'vehicle number',
+                    _maxNumber,
+                    example: 'AB 12345',
+                  ),
                 ),
-                DropdownButtonFormField<String>(
-                  initialValue: _company,
-                  isExpanded: true,
+                TextFormField(
+                  controller: _company,
+                  textCapitalization: TextCapitalization.words,
+                  textInputAction: TextInputAction.next,
+                  inputFormatters: [
+                    LengthLimitingTextInputFormatter(_maxCompany),
+                  ],
+                  onChanged: (_) => _clearServerError('company'),
                   decoration: const InputDecoration(
                     labelText: 'Company *',
                     helperText: 'The company that owns the vehicle',
                     prefixIcon: Icon(Icons.business_outlined),
                   ),
-                  hint: const Text('Select a company'),
-                  items: [
-                    for (final c in mockCompanies)
-                      DropdownMenuItem(value: c, child: Text(c)),
-                  ],
-                  onChanged: (value) => setState(() => _company = value),
-                  validator: (value) =>
-                      value == null ? 'Select the company that owns it.' : null,
+                  validator: _validator('company', 'company', _maxCompany),
                 ),
               ],
             ),
@@ -255,50 +336,79 @@ class _VehicleFormScreenState extends State<VehicleFormScreen> {
             description: 'Type, brand and model as shown in the registration.',
             child: FieldGrid(
               children: [
-                DropdownButtonFormField<VehicleType>(
-                  initialValue: _type,
-                  isExpanded: true,
-                  decoration: const InputDecoration(
-                    labelText: 'Type *',
-                    prefixIcon: Icon(Icons.category_outlined),
-                  ),
-                  hint: const Text('Select a vehicle type'),
-                  items: [
-                    for (final t in VehicleType.values)
-                      DropdownMenuItem(
-                        value: t,
-                        child: Row(
-                          children: [
-                            Icon(vehicleTypeIcon(t), size: 18),
-                            const SizedBox(width: AppSpacing.sm + 2),
-                            Text(t.label),
-                          ],
-                        ),
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    TextFormField(
+                      controller: _type,
+                      textCapitalization: TextCapitalization.words,
+                      textInputAction: TextInputAction.next,
+                      inputFormatters: [
+                        LengthLimitingTextInputFormatter(_maxShort),
+                      ],
+                      onChanged: (_) => _clearServerError('type'),
+                      decoration: const InputDecoration(
+                        labelText: 'Type *',
+                        hintText: 'Truck',
+                        prefixIcon: Icon(Icons.category_outlined),
                       ),
+                      validator: _validator('type', 'type', _maxShort),
+                    ),
+                    const SizedBox(height: AppSpacing.sm),
+                    Wrap(
+                      spacing: AppSpacing.sm,
+                      runSpacing: AppSpacing.xs,
+                      children: [
+                        for (final t in _typeSuggestions)
+                          ActionChip(
+                            avatar: Icon(vehicleTypeIcon(t), size: 16),
+                            label: Text(t),
+                            onPressed: () {
+                              _type.text = t;
+                              _clearServerError('type');
+                            },
+                          ),
+                      ],
+                    ),
                   ],
-                  onChanged: (value) => setState(() => _type = value),
-                  validator: (value) =>
-                      value == null ? 'Select the vehicle type.' : null,
                 ),
                 TextFormField(
                   controller: _brand,
                   textCapitalization: TextCapitalization.words,
                   textInputAction: TextInputAction.next,
+                  inputFormatters: [
+                    LengthLimitingTextInputFormatter(_maxShort),
+                  ],
+                  onChanged: (_) => _clearServerError('brand'),
                   decoration: const InputDecoration(
                     labelText: 'Brand *',
                     hintText: 'Volvo',
                   ),
-                  validator: _validateText('brand', 'Volvo'),
+                  validator: _validator(
+                    'brand',
+                    'brand',
+                    _maxShort,
+                    example: 'Volvo',
+                  ),
                 ),
                 TextFormField(
                   controller: _model,
                   textCapitalization: TextCapitalization.words,
                   textInputAction: TextInputAction.done,
+                  inputFormatters: [
+                    LengthLimitingTextInputFormatter(_maxShort),
+                  ],
+                  onChanged: (_) => _clearServerError('model'),
                   decoration: const InputDecoration(
                     labelText: 'Model *',
                     hintText: 'FH16',
                   ),
-                  validator: _validateText('model', 'FH16'),
+                  validator: _validator(
+                    'model',
+                    'model',
+                    _maxShort,
+                    example: 'FH16',
+                  ),
                 ),
               ],
             ),

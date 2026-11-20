@@ -46,3 +46,8 @@ app.*.map.json
 
 # Widget Preview related
 .widget_preview/
+
+# Real per-environment build configs (copy config/prod.example.json). They hold
+# only a public API URL, never secrets, but keep local variants out of git.
+config/*.local.json
+config/prod.json

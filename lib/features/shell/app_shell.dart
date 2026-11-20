@@ -6,6 +6,7 @@ import '../../core/routing/app_router.dart';
 import '../../core/routing/app_routes.dart';
 import '../../core/theme/app_tokens.dart';
 import '../../core/widgets/fade_slide_in.dart';
+import '../auth/session_scope.dart';
 
 /// Sidebar + content area. Screens inside the content area are shown by a
 /// nested [Navigator], so only the content slides when you navigate.
@@ -41,9 +42,8 @@ class _AppShellState extends State<AppShell> {
     );
   }
 
-  void _logout() {
-    Navigator.of(context).pushReplacementNamed(AppRoutes.login);
-  }
+  // Ending the session is enough: AuthGuard sends the user to the sign-in screen.
+  void _logout() => SessionScope.of(context).logout();
 
   Widget _sidebar({bool collapsed = false, VoidCallback? beforeNavigate}) {
     return ValueListenableBuilder<String>(
@@ -179,6 +179,7 @@ class _Sidebar extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
+    final email = SessionScope.of(context).email ?? '';
     final align = collapsed
         ? MainAxisAlignment.center
         : MainAxisAlignment.start;
@@ -229,7 +230,7 @@ class _Sidebar extends StatelessWidget {
                   radius: 18,
                   backgroundColor: scheme.primaryContainer,
                   foregroundColor: scheme.primary,
-                  child: const Text('A'),
+                  child: Text(email.isEmpty ? '?' : email[0].toUpperCase()),
                 ),
                 if (!collapsed) ...[
                   const SizedBox(width: AppSpacing.sm + 2),
@@ -237,9 +238,9 @@ class _Sidebar extends StatelessWidget {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text('Admin', style: theme.textTheme.titleSmall),
+                        Text('Signed in', style: theme.textTheme.titleSmall),
                         Text(
-                          'admin@vms.com',
+                          email,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: theme.textTheme.bodySmall?.copyWith(

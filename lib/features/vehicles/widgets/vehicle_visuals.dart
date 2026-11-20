@@ -3,31 +3,32 @@ import 'package:material_ui/material_ui.dart';
 import '../../../core/theme/app_tokens.dart';
 import '../../../models/vehicle.dart';
 
-IconData vehicleTypeIcon(VehicleType type) {
-  switch (type) {
-    case VehicleType.car:
-      return Icons.directions_car_outlined;
-    case VehicleType.van:
-      return Icons.airport_shuttle_outlined;
-    case VehicleType.truck:
-      return Icons.local_shipping_outlined;
-    case VehicleType.trailer:
-      return Icons.rv_hookup_outlined;
-    case VehicleType.forklift:
-      return Icons.precision_manufacturing_outlined;
+/// The backend stores the type as free text, so pick an icon by keyword and
+/// fall back to a generic one for anything unknown.
+IconData vehicleTypeIcon(String type) {
+  final t = type.toLowerCase();
+  if (t.contains('truck') || t.contains('lorry')) {
+    return Icons.local_shipping_outlined;
   }
+  if (t.contains('van') || t.contains('bus')) {
+    return Icons.airport_shuttle_outlined;
+  }
+  if (t.contains('trailer')) return Icons.rv_hookup_outlined;
+  if (t.contains('forklift')) return Icons.precision_manufacturing_outlined;
+  if (t.contains('car') || t.contains('sedan')) {
+    return Icons.directions_car_outlined;
+  }
+  return Icons.commute_outlined;
 }
 
 Color vehicleStatusColor(VehicleStatus status) {
   switch (status) {
-    case VehicleStatus.available:
+    case VehicleStatus.active:
       return AppColors.success;
-    case VehicleStatus.inUse:
-      return AppColors.info;
-    case VehicleStatus.maintenance:
-      return AppColors.warning;
-    case VehicleStatus.retired:
+    case VehicleStatus.inactive:
       return AppColors.neutral;
+    case VehicleStatus.underMaintenance:
+      return AppColors.warning;
   }
 }
 

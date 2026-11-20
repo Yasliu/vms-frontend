@@ -1,43 +1,13 @@
-import 'package:flutter/foundation.dart';
-
 import '../models/vehicle.dart';
-import 'mock_vehicles.dart';
 
-/// In-memory store that stands in for a backend until an API exists.
-class VehicleRepository {
-  VehicleRepository._();
+/// Everything the app can do with vehicles. Implementations throw
+/// `ApiException` on failure and never expose transport details.
+abstract class VehicleRepository {
+  Future<List<Vehicle>> fetchAll();
 
-  static final VehicleRepository instance = VehicleRepository._();
+  Future<Vehicle> create(VehicleInput input);
 
-  final ValueNotifier<List<Vehicle>> vehicles = ValueNotifier<List<Vehicle>>(
-    List<Vehicle>.of(mockVehicles),
-  );
+  Future<Vehicle> update(int id, VehicleInput input);
 
-  int _counter = mockVehicles.length;
-
-  String nextId() {
-    _counter++;
-    return 'V-${_counter.toString().padLeft(3, '0')}';
-  }
-
-  bool isNumberTaken(String number, {String? exceptId}) {
-    final wanted = number.trim().toUpperCase();
-    return vehicles.value.any(
-      (v) => v.id != exceptId && v.vehicleNumber.toUpperCase() == wanted,
-    );
-  }
-
-  void add(Vehicle vehicle) {
-    vehicles.value = [...vehicles.value, vehicle];
-  }
-
-  void update(Vehicle vehicle) {
-    vehicles.value = [
-      for (final v in vehicles.value) v.id == vehicle.id ? vehicle : v,
-    ];
-  }
-
-  void remove(String id) {
-    vehicles.value = vehicles.value.where((v) => v.id != id).toList();
-  }
+  Future<void> delete(int id);
 }

@@ -1,6 +1,8 @@
 import 'package:material_ui/material_ui.dart';
 
+import '../../features/auth/auth_guard.dart';
 import '../../features/auth/login_screen.dart';
+import '../../features/auth/sign_up_screen.dart';
 import '../../features/shell/app_shell.dart';
 import '../../features/vehicles/vehicle_form_screen.dart';
 import '../../features/vehicles/vehicle_list_screen.dart';
@@ -15,7 +17,9 @@ class AppRouter {
   static Route<dynamic> onGenerateRootRoute(RouteSettings settings) {
     switch (settings.name) {
       case AppRoutes.shell:
-        return fadeScaleRoute(const AppShell(), settings);
+        return fadeScaleRoute(const AuthGuard(child: AppShell()), settings);
+      case AppRoutes.register:
+        return fadeScaleRoute(const SignUpScreen(), settings);
       case AppRoutes.login:
       default:
         return fadeScaleRoute(const LoginScreen(), settings);

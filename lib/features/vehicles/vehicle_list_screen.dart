@@ -9,8 +9,10 @@ import '../../core/widgets/animated_collapse.dart';
 import '../../core/widgets/app_button.dart';
 import '../../core/widgets/fade_slide_in.dart';
 import '../../core/widgets/page_header.dart';
-import '../../data/vehicle_repository.dart';
+import '../../core/network/api_exception.dart';
 import '../../models/vehicle.dart';
+import 'vehicle_controller.dart';
+import 'vehicle_scope.dart';
 import 'widgets/vehicle_visuals.dart';
 
 class VehicleListScreen extends StatefulWidget {
@@ -21,13 +23,16 @@ class VehicleListScreen extends StatefulWidget {
 }
 
 class _VehicleListScreenState extends State<VehicleListScreen> {
-  final _repository = VehicleRepository.instance;
+  late final VehicleController _controller;
   final _searchController = TextEditingController();
   String _query = '';
   VehicleStatus? _statusFilter;
 
   // Rows that were deleted and are currently animating out.
-  final _removing = <String>{};
+  // Rows with a delete request in flight: still shown, but busy.
+  final _deleting = <int>{};
+  // Rows the server has deleted and that are animating out.
+  final _removing = <int>{};
   // False during the first build so existing rows use the staggered intro;
   // rows added later grow into place instead.
   bool _initialized = false;
@@ -37,6 +42,7 @@ class _VehicleListScreenState extends State<VehicleListScreen> {
   @override
   void initState() {
     super.initState();
+    _controller = VehicleScope.of(context)..ensureLoaded();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _initialized = true;
     });
@@ -57,7 +63,7 @@ class _VehicleListScreenState extends State<VehicleListScreen> {
         v.vehicleNumber.toLowerCase().contains(q) ||
         v.company.toLowerCase().contains(q) ||
         v.displayName.toLowerCase().contains(q) ||
-        v.type.label.toLowerCase().contains(q);
+        v.type.toLowerCase().contains(q);
     return matchesStatus && matchesQuery;
   }
 
@@ -106,14 +112,47 @@ class _VehicleListScreenState extends State<VehicleListScreen> {
     );
     if (confirmed != true || !mounted) return;
 
-    setState(() => _removing.add(vehicle.id));
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text('${vehicle.vehicleNumber} deleted')));
-    // Let the row collapse before it is removed from the data.
-    await Future<void>.delayed(const Duration(milliseconds: 400));
-    _repository.remove(vehicle.id);
-    _removing.remove(vehicle.id);
+    if (_deleting.contains(vehicle.id)) return;
+    final messenger = ScaffoldMessenger.of(context);
+    final errorColor = Theme.of(context).colorScheme.error;
+    // The row stays visible (and busy) until the server confirms.
+    setState(() => _deleting.add(vehicle.id));
+    try {
+      await _controller.delete(
+        vehicle,
+        beforeRemoval: () async {
+          if (!mounted) return;
+          setState(() => _removing.add(vehicle.id));
+          // Let the row collapse before it leaves the data.
+          await Future<void>.delayed(const Duration(milliseconds: 400));
+        },
+      );
+      messenger.showSnackBar(
+        SnackBar(content: Text('${vehicle.vehicleNumber} deleted')),
+      );
+    } on ApiException catch (e) {
+      // After a timeout the server may have deleted it; the controller has
+      // already re-read the list, so say so instead of just "try again".
+      final message = e.kind == ApiErrorKind.timeout
+          ? 'No answer from the server while deleting ${vehicle.vehicleNumber}. '
+                'The list was refreshed with the latest data.'
+          : 'Could not delete ${vehicle.vehicleNumber}. ${e.message}';
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(message),
+          backgroundColor: errorColor,
+          // Errors need more reading time than the default 4 seconds.
+          duration: const Duration(seconds: 7),
+        ),
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          _deleting.remove(vehicle.id);
+          _removing.remove(vehicle.id);
+        });
+      }
+    }
   }
 
   void _edit(Vehicle vehicle) {
@@ -126,11 +165,13 @@ class _VehicleListScreenState extends State<VehicleListScreen> {
   Widget build(BuildContext context) {
     final width = MediaQuery.sizeOf(context).width;
 
-    return ValueListenableBuilder<List<Vehicle>>(
-      valueListenable: _repository.vehicles,
-      builder: (context, all, _) {
+    return ListenableBuilder(
+      listenable: _controller,
+      builder: (context, _) {
+        final all = _controller.vehicles;
         final current = all.where((v) => !_removing.contains(v.id)).toList();
         final visibleCount = all.where(_isVisible).length;
+        final phase = _controller.phase;
 
         return ListView(
           padding: EdgeInsets.all(Breakpoints.pagePadding(width)),
@@ -147,39 +188,202 @@ class _VehicleListScreenState extends State<VehicleListScreen> {
               ),
             ),
             const SizedBox(height: AppSpacing.lg),
-            _StatsRow(vehicles: current),
-            const SizedBox(height: AppSpacing.lg),
-            FadeSlideIn(
-              delay: const Duration(milliseconds: 250),
-              child: _Filters(
-                controller: _searchController,
-                selected: _statusFilter,
-                onQueryChanged: (value) => setState(() => _query = value),
-                onStatusChanged: (value) =>
-                    setState(() => _statusFilter = value),
+            if (phase == VehicleListPhase.loading)
+              const _LoadingState()
+            else if (phase == VehicleListPhase.failed)
+              _ErrorState(
+                message: _controller.error ?? 'Something went wrong.',
+                onRetry: _controller.load,
+              )
+            else ...[
+              if (_controller.error != null) ...[
+                _RefreshErrorBanner(
+                  message: _controller.error!,
+                  onRetry: _controller.load,
+                ),
+                const SizedBox(height: AppSpacing.md),
+              ],
+              _StatsRow(vehicles: current),
+              const SizedBox(height: AppSpacing.lg),
+              FadeSlideIn(
+                delay: const Duration(milliseconds: 250),
+                child: _Filters(
+                  controller: _searchController,
+                  selected: _statusFilter,
+                  onQueryChanged: (value) => setState(() => _query = value),
+                  onStatusChanged: (value) =>
+                      setState(() => _statusFilter = value),
+                ),
               ),
-            ),
-            const SizedBox(height: AppSpacing.sm),
-            _ResultsBar(
-              shown: visibleCount,
-              total: current.length,
-              showClear: _hasFilters,
-              onClear: _clearFilters,
-            ),
-            const SizedBox(height: AppSpacing.sm),
-            _VehicleTable(
-              vehicles: all,
-              isVisible: _isVisible,
-              animateIn: _initialized,
-              hasVehicles: current.isNotEmpty,
-              onEdit: _edit,
-              onDelete: _confirmDelete,
-              onClearFilters: _clearFilters,
-              onRegister: _register,
-            ),
+              const SizedBox(height: AppSpacing.sm),
+              _ResultsBar(
+                shown: visibleCount,
+                total: current.length,
+                showClear: _hasFilters,
+                onClear: _clearFilters,
+                isRefreshing: _controller.isRefreshing,
+                onRefresh: _controller.load,
+              ),
+              const SizedBox(height: AppSpacing.sm),
+              _VehicleTable(
+                vehicles: all,
+                isVisible: _isVisible,
+                deleting: _deleting,
+                animateIn: _initialized,
+                hasVehicles: current.isNotEmpty,
+                onEdit: _edit,
+                onDelete: _confirmDelete,
+                onClearFilters: _clearFilters,
+                onRegister: _register,
+              ),
+            ],
           ],
         );
       },
+    );
+  }
+}
+
+class _LoadingState extends StatelessWidget {
+  const _LoadingState();
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(
+          vertical: AppSpacing.xxl,
+          horizontal: AppSpacing.lg,
+        ),
+        child: Center(
+          child: Semantics(
+            liveRegion: true,
+            label: 'Loading vehicles',
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const SizedBox(
+                  width: 40,
+                  height: 40,
+                  child: CircularProgressIndicator(),
+                ),
+                const SizedBox(height: AppSpacing.md),
+                Text('Loading vehicles…', style: theme.textTheme.titleMedium),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ErrorState extends StatelessWidget {
+  const _ErrorState({required this.message, required this.onRetry});
+
+  final String message;
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(
+          vertical: AppSpacing.xxl,
+          horizontal: AppSpacing.lg,
+        ),
+        child: Center(
+          child: Semantics(
+            liveRegion: true,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 80,
+                  height: 80,
+                  decoration: BoxDecoration(
+                    color: scheme.errorContainer,
+                    shape: BoxShape.circle,
+                  ),
+                  child: Icon(
+                    Icons.cloud_off_outlined,
+                    size: 40,
+                    color: scheme.onErrorContainer,
+                  ),
+                ),
+                const SizedBox(height: AppSpacing.md),
+                Text(
+                  'Could not load vehicles',
+                  textAlign: TextAlign.center,
+                  style: theme.textTheme.titleLarge,
+                ),
+                const SizedBox(height: AppSpacing.xs),
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 420),
+                  child: Text(
+                    message,
+                    textAlign: TextAlign.center,
+                    style: theme.textTheme.bodyMedium?.copyWith(
+                      color: scheme.onSurfaceVariant,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: AppSpacing.lg),
+                AppButton(
+                  label: 'Try again',
+                  icon: Icons.refresh,
+                  onPressed: onRetry,
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _RefreshErrorBanner extends StatelessWidget {
+  const _RefreshErrorBanner({required this.message, required this.onRetry});
+
+  final String message;
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: AppSpacing.md,
+        vertical: AppSpacing.sm,
+      ),
+      decoration: BoxDecoration(
+        color: scheme.errorContainer,
+        borderRadius: BorderRadius.circular(AppRadius.md),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.error_outline, color: scheme.onErrorContainer),
+          const SizedBox(width: AppSpacing.sm + 4),
+          Expanded(
+            child: Semantics(
+              liveRegion: true,
+              child: Text(
+                'Could not refresh the list. $message Showing the last '
+                'loaded data.',
+                style: theme.textTheme.bodyMedium?.copyWith(
+                  color: scheme.onErrorContainer,
+                ),
+              ),
+            ),
+          ),
+          TextButton(onPressed: onRetry, child: const Text('Retry')),
+        ],
+      ),
     );
   }
 }
@@ -201,22 +405,22 @@ class _StatsRow extends StatelessWidget {
         AppColors.navy,
       ),
       (
-        'Available',
-        count(VehicleStatus.available),
+        'Active',
+        count(VehicleStatus.active),
         Icons.check_circle_outline,
-        vehicleStatusColor(VehicleStatus.available),
+        vehicleStatusColor(VehicleStatus.active),
       ),
       (
-        'In use',
-        count(VehicleStatus.inUse),
-        Icons.route_outlined,
-        vehicleStatusColor(VehicleStatus.inUse),
+        'Inactive',
+        count(VehicleStatus.inactive),
+        Icons.pause_circle_outline,
+        vehicleStatusColor(VehicleStatus.inactive),
       ),
       (
-        'Maintenance',
-        count(VehicleStatus.maintenance),
+        'Under maintenance',
+        count(VehicleStatus.underMaintenance),
         Icons.build_outlined,
-        vehicleStatusColor(VehicleStatus.maintenance),
+        vehicleStatusColor(VehicleStatus.underMaintenance),
       ),
     ];
 
@@ -394,12 +598,16 @@ class _ResultsBar extends StatelessWidget {
     required this.total,
     required this.showClear,
     required this.onClear,
+    required this.isRefreshing,
+    required this.onRefresh,
   });
 
   final int shown;
   final int total;
   final bool showClear;
   final VoidCallback onClear;
+  final bool isRefreshing;
+  final VoidCallback onRefresh;
 
   @override
   Widget build(BuildContext context) {
@@ -439,6 +647,20 @@ class _ResultsBar extends StatelessWidget {
                   )
                 : const SizedBox.shrink(key: ValueKey('none')),
           ),
+          isRefreshing
+              ? const Padding(
+                  padding: EdgeInsets.all(AppSpacing.sm + 4),
+                  child: SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                )
+              : IconButton(
+                  tooltip: 'Refresh list',
+                  onPressed: onRefresh,
+                  icon: const Icon(Icons.refresh),
+                ),
         ],
       ),
     );
@@ -548,6 +770,7 @@ class _VehicleTable extends StatelessWidget {
   const _VehicleTable({
     required this.vehicles,
     required this.isVisible,
+    required this.deleting,
     required this.animateIn,
     required this.hasVehicles,
     required this.onEdit,
@@ -558,6 +781,7 @@ class _VehicleTable extends StatelessWidget {
 
   final List<Vehicle> vehicles;
   final bool Function(Vehicle) isVisible;
+  final Set<int> deleting;
   final bool animateIn;
   final bool hasVehicles;
   final ValueChanged<Vehicle> onEdit;
@@ -601,6 +825,7 @@ class _VehicleTable extends StatelessWidget {
                       child: _VehicleRow(
                         vehicle: vehicle,
                         layout: layout,
+                        busy: deleting.contains(vehicle.id),
                         onEdit: () => onEdit(vehicle),
                         onDelete: () => onDelete(vehicle),
                       ),
@@ -694,12 +919,16 @@ class _VehicleRow extends StatefulWidget {
   const _VehicleRow({
     required this.vehicle,
     required this.layout,
+    required this.busy,
     required this.onEdit,
     required this.onDelete,
   });
 
   final Vehicle vehicle;
   final _TableLayout layout;
+
+  /// A delete request for this row is in flight.
+  final bool busy;
   final VoidCallback onEdit;
   final VoidCallback onDelete;
 
@@ -725,12 +954,43 @@ class _VehicleRowState extends State<_VehicleRow> {
       children: [
         Icon(vehicleTypeIcon(v.type), size: 18, color: scheme.onSurfaceVariant),
         const SizedBox(width: AppSpacing.sm),
-        Flexible(child: Text(v.type.label, overflow: TextOverflow.ellipsis)),
+        Flexible(child: Text(v.type, overflow: TextOverflow.ellipsis)),
       ],
     );
 
     final Widget actions;
-    if (layout == _TableLayout.full || layout == _TableLayout.compact) {
+    if (widget.busy) {
+      actions = Semantics(
+        liveRegion: true,
+        label: 'Deleting ${v.vehicleNumber}',
+        child: Padding(
+          padding: const EdgeInsets.symmetric(
+            horizontal: AppSpacing.sm,
+            vertical: AppSpacing.sm,
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: scheme.error,
+                ),
+              ),
+              const SizedBox(width: AppSpacing.sm),
+              Text(
+                'Deleting…',
+                style: theme.textTheme.labelLarge?.copyWith(
+                  color: scheme.error,
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    } else if (layout == _TableLayout.full || layout == _TableLayout.compact) {
       actions = Row(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -782,7 +1042,7 @@ class _VehicleRowState extends State<_VehicleRow> {
             ),
             const SizedBox(height: AppSpacing.sm + 2),
             Text(v.displayName, style: theme.textTheme.titleSmall),
-            Text('${v.company} · ${v.type.label}', style: muted),
+            Text('${v.company} · ${v.type}', style: muted),
             const SizedBox(height: AppSpacing.xs),
             Align(alignment: Alignment.centerRight, child: actions),
           ],
@@ -803,7 +1063,7 @@ class _VehicleRowState extends State<_VehicleRow> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(v.displayName, style: theme.textTheme.titleSmall),
-                  Text('${v.company} · ${v.type.label}', style: muted),
+                  Text('${v.company} · ${v.type}', style: muted),
                 ],
               ),
             ),
@@ -863,10 +1123,10 @@ class _VehicleRowState extends State<_VehicleRow> {
     return Semantics(
       container: true,
       label:
-          '${v.vehicleNumber}, ${v.displayName}, ${v.type.label}, '
+          '${v.vehicleNumber}, ${v.displayName}, ${v.type}, '
           '${v.company}, status ${v.status.label}',
       child: InkWell(
-        onTap: widget.onEdit,
+        onTap: widget.busy ? null : widget.onEdit,
         onHover: (value) => setState(() => _hovered = value),
         child: Container(
           decoration: BoxDecoration(
@@ -883,7 +1143,11 @@ class _VehicleRowState extends State<_VehicleRow> {
               AppSpacing.lg,
               AppSpacing.sm + 2,
             ),
-            child: content,
+            child: AnimatedOpacity(
+              duration: const Duration(milliseconds: 200),
+              opacity: widget.busy ? 0.55 : 1,
+              child: content,
+            ),
           ),
         ),
       ),

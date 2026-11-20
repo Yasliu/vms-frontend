@@ -1,9 +1,12 @@
 import 'package:material_ui/material_ui.dart';
 
+import '../../core/network/api_exception.dart';
 import '../../core/routing/app_routes.dart';
 import '../../core/theme/app_tokens.dart';
 import '../../core/widgets/app_button.dart';
 import '../../core/widgets/fade_slide_in.dart';
+import 'session_scope.dart';
+import 'widgets/auth_widgets.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -16,8 +19,12 @@ class _LoginScreenState extends State<LoginScreen> {
   final _formKey = GlobalKey<FormState>();
   final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
+  // Changing this gives the password field a fresh state (no validation
+  // history), so a cleared field does not show a "required" error.
+  int _passwordGeneration = 0;
   bool _obscure = true;
   bool _loading = false;
+  String? _error;
 
   @override
   void dispose() {
@@ -26,13 +33,42 @@ class _LoginScreenState extends State<LoginScreen> {
     super.dispose();
   }
 
-  // Mock sign-in: any valid-looking email and non-empty password is accepted.
   Future<void> _submit() async {
+    if (_loading) return;
     if (!_formKey.currentState!.validate()) return;
-    setState(() => _loading = true);
-    await Future<void>.delayed(const Duration(milliseconds: 900));
+
+    final session = SessionScope.of(context);
+    final navigator = Navigator.of(context);
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+
+    try {
+      await session.login(_emailController.text, _passwordController.text);
+    } on ApiException catch (e) {
+      _fail(e.message);
+      return;
+    } on Exception {
+      _fail('Something went wrong while signing in. Please try again.');
+      return;
+    }
+
     if (!mounted) return;
-    Navigator.of(context).pushReplacementNamed(AppRoutes.shell);
+    // The password is not needed any more; do not leave it in the field.
+    _passwordController.clear();
+    navigator.pushReplacementNamed(AppRoutes.shell);
+  }
+
+  void _fail(String message) {
+    if (!mounted) return;
+    // Clear the password after every failed attempt; keep the email.
+    _passwordController.clear();
+    setState(() {
+      _passwordGeneration++;
+      _loading = false;
+      _error = message;
+    });
   }
 
   @override
@@ -42,7 +78,7 @@ class _LoginScreenState extends State<LoginScreen> {
     return Scaffold(
       body: Row(
         children: [
-          if (showBrandPanel) const Expanded(flex: 5, child: _BrandPanel()),
+          if (showBrandPanel) const Expanded(flex: 5, child: AuthBrandPanel()),
           Expanded(
             flex: 4,
             child: Center(
@@ -74,33 +110,7 @@ class _LoginScreenState extends State<LoginScreen> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             if (!showBrandPanel) ...[
-              FadeSlideIn(
-                child: Row(
-                  children: [
-                    Container(
-                      width: 40,
-                      height: 40,
-                      decoration: BoxDecoration(
-                        color: AppColors.navy,
-                        borderRadius: BorderRadius.circular(AppRadius.md),
-                      ),
-                      child: const Icon(
-                        Icons.local_shipping_rounded,
-                        color: AppColors.accent,
-                      ),
-                    ),
-                    const SizedBox(width: AppSpacing.sm + 4),
-                    Text(
-                      'STARK GROUP',
-                      style: theme.textTheme.titleMedium?.copyWith(
-                        letterSpacing: 1.2,
-                        fontWeight: FontWeight.w800,
-                        color: AppColors.navy,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
+              const FadeSlideIn(child: AuthBrandMark()),
               const SizedBox(height: AppSpacing.xl),
             ],
             FadeSlideIn(
@@ -123,6 +133,10 @@ class _LoginScreenState extends State<LoginScreen> {
               ),
             ),
             const SizedBox(height: AppSpacing.xl),
+            AuthMessageBanner(
+              message: _error ?? SessionScope.of(context).notice,
+              isError: _error != null,
+            ),
             FadeSlideIn(
               delay: step * 2,
               child: TextFormField(
@@ -149,8 +163,12 @@ class _LoginScreenState extends State<LoginScreen> {
             FadeSlideIn(
               delay: step * 3,
               child: TextFormField(
+                key: ValueKey('password-$_passwordGeneration'),
                 controller: _passwordController,
                 obscureText: _obscure,
+                enableSuggestions: false,
+                autocorrect: false,
+                textInputAction: TextInputAction.done,
                 autofillHints: const [AutofillHints.password],
                 onFieldSubmitted: (_) => _submit(),
                 decoration: InputDecoration(
@@ -191,95 +209,29 @@ class _LoginScreenState extends State<LoginScreen> {
             const SizedBox(height: AppSpacing.md),
             FadeSlideIn(
               delay: step * 5,
-              child: Text(
-                'Demo mode: any valid email and password will work.',
-                textAlign: TextAlign.center,
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: theme.colorScheme.onSurfaceVariant,
-                ),
+              child: Wrap(
+                alignment: WrapAlignment.center,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  Text(
+                    "Don't have an account?",
+                    style: theme.textTheme.bodyMedium?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                  TextButton(
+                    onPressed: _loading
+                        ? null
+                        : () =>
+                              Navigator.of(context)
+                                  .pushReplacementNamed(AppRoutes.register),
+                    child: const Text('Sign up'),
+                  ),
+                ],
               ),
             ),
           ],
         ),
-      ),
-    );
-  }
-}
-
-class _BrandPanel extends StatelessWidget {
-  const _BrandPanel();
-
-  @override
-  Widget build(BuildContext context) {
-    final textTheme = Theme.of(context).textTheme;
-    final padding = MediaQuery.sizeOf(context).width < 1200
-        ? AppSpacing.xxl - 8
-        : AppSpacing.xxl + 16;
-
-    return Container(
-      decoration: const BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [AppColors.navy, AppColors.navyLight],
-        ),
-      ),
-      padding: EdgeInsets.all(padding),
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          TweenAnimationBuilder<double>(
-            tween: Tween(begin: 0, end: 1),
-            duration: const Duration(milliseconds: 900),
-            curve: Curves.elasticOut,
-            builder: (context, value, child) =>
-                Transform.scale(scale: value, child: child),
-            child: const Icon(
-              Icons.local_shipping_rounded,
-              size: 64,
-              color: AppColors.accent,
-            ),
-          ),
-          const SizedBox(height: AppSpacing.lg),
-          FadeSlideIn(
-            delay: const Duration(milliseconds: 200),
-            offset: const Offset(-0.1, 0),
-            child: Text(
-              'STARK GROUP',
-              style: textTheme.titleMedium?.copyWith(
-                color: AppColors.accent,
-                letterSpacing: 2,
-                fontWeight: FontWeight.w800,
-              ),
-            ),
-          ),
-          const SizedBox(height: AppSpacing.sm),
-          FadeSlideIn(
-            delay: const Duration(milliseconds: 280),
-            offset: const Offset(-0.1, 0),
-            child: Text(
-              'Vehicle Management System',
-              style: textTheme.displaySmall?.copyWith(
-                color: Colors.white,
-                fontWeight: FontWeight.w700,
-              ),
-            ),
-          ),
-          const SizedBox(height: AppSpacing.md),
-          FadeSlideIn(
-            delay: const Duration(milliseconds: 380),
-            offset: const Offset(-0.1, 0),
-            child: Text(
-              'Register, track and maintain every vehicle in your fleet '
-              'from one simple dashboard.',
-              style: textTheme.titleMedium?.copyWith(
-                color: Colors.white.withValues(alpha: 0.85),
-                fontWeight: FontWeight.w400,
-              ),
-            ),
-          ),
-        ],
       ),
     );
   }
