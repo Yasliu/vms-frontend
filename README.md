@@ -29,6 +29,22 @@ In production the backend must allow the web app's origin: set `CORS_ALLOWED_ORI
 
 **No secrets in the frontend.** Everything passed with `--dart-define` is compiled into the JavaScript and readable by anyone who opens the site. Only put public values (the API URL) there. Database credentials live only in the backend's environment.
 
+## Deploy to Netlify
+
+Netlify has no Flutter, so `netlify.toml` runs `scripts/netlify-build.sh`, which installs the pinned Flutter version, checks the API URL, and builds.
+
+| Netlify setting | Value |
+|---|---|
+| Build command | `bash scripts/netlify-build.sh` (already set in `netlify.toml`) |
+| Publish directory | `build/web` (already set in `netlify.toml`) |
+| Environment variable | `API_BASE_URL` = `https://your-backend-host` (Site configuration, Environment variables) |
+
+- The build **fails on purpose** if `API_BASE_URL` is missing, is not `https://`, or contains credentials. Otherwise a release build would call the Netlify site itself and every request would fail.
+- `API_BASE_URL` is public: it is compiled into the JavaScript. Put only the backend address there, never database settings, `JWT_SECRET`, passwords or tokens. Those exist only on the backend.
+- Routing uses `#/` URLs, so no Netlify redirect rules are needed.
+- The backend must allow the site: set `CORS_ALLOWED_ORIGINS=https://your-site.netlify.app` there (and your custom domain, if any), and serve the API over HTTPS.
+- The first build downloads Flutter, so it takes a few minutes.
+
 ## Build and check
 
 ```bash
