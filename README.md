@@ -39,7 +39,7 @@ Netlify has no Flutter, so `netlify.toml` runs `scripts/netlify-build.sh`, which
 | Publish directory | `build/web` (already set in `netlify.toml`) |
 | Environment variable | `API_BASE_URL` = `https://your-backend-host` (Site configuration, Environment variables) |
 
-- The build **fails on purpose** if `API_BASE_URL` is missing, is not `https://`, or contains credentials. Otherwise a release build would call the Netlify site itself and every request would fail.
+- If `API_BASE_URL` is not set yet, the build still succeeds (with a warning) so you can verify the frontend loads on Netlify before connecting the live backend. When `API_BASE_URL` is set, the build fails if it does not start with `https://` or contains credentials.
 - `API_BASE_URL` is public: it is compiled into the JavaScript. Put only the backend address there, never database settings, `JWT_SECRET`, passwords or tokens. Those exist only on the backend.
 - Routing uses `#/` URLs, so no Netlify redirect rules are needed.
 - The backend must allow the site: set `CORS_ALLOWED_ORIGINS=https://your-site.netlify.app` there (and your custom domain, if any), and serve the API over HTTPS.

@@ -10,19 +10,20 @@ set -euo pipefail
 
 FLUTTER_VERSION="${FLUTTER_VERSION:-3.50.0}"
 
-if [ -z "${API_BASE_URL:-}" ]; then
-  echo "ERROR: API_BASE_URL is not set." >&2
-  echo "Without it a release build would call the Netlify site itself and every request would fail." >&2
-  echo "Set it under Site configuration > Environment variables (for example https://api.example.com)." >&2
-  exit 1
+API_BASE_URL="${API_BASE_URL:-}"
+
+if [ -z "$API_BASE_URL" ]; then
+  echo "WARNING: API_BASE_URL is not set. Building frontend without a live backend URL." >&2
+  echo "Set API_BASE_URL under Site configuration > Environment variables (e.g. https://your-backend-host) once the backend is ready." >&2
+else
+  case "$API_BASE_URL" in
+    https://*) ;;
+    *) echo "ERROR: API_BASE_URL must start with https:// (browsers block http:// calls from an https site)." >&2; exit 1 ;;
+  esac
+  case "$API_BASE_URL" in
+    *@*) echo "ERROR: API_BASE_URL must not contain credentials (user:password@)." >&2; exit 1 ;;
+  esac
 fi
-case "$API_BASE_URL" in
-  https://*) ;;
-  *) echo "ERROR: API_BASE_URL must start with https:// (browsers block http:// calls from an https site)." >&2; exit 1 ;;
-esac
-case "$API_BASE_URL" in
-  *@*) echo "ERROR: API_BASE_URL must not contain credentials (user:password@)." >&2; exit 1 ;;
-esac
 
 if ! command -v flutter >/dev/null 2>&1; then
   echo "Installing Flutter $FLUTTER_VERSION ..."
@@ -33,4 +34,4 @@ fi
 flutter --version
 flutter pub get
 flutter build web --release --dart-define=API_BASE_URL="$API_BASE_URL"
-echo "Built build/web for API $API_BASE_URL"
+echo "Built build/web (API_BASE_URL=${API_BASE_URL:-<not set>})"
