@@ -25,11 +25,19 @@ else
   esac
 fi
 
+export PATH="$HOME/flutter-sdk/bin:$PATH"
+
 if ! command -v flutter >/dev/null 2>&1; then
-  echo "Installing Flutter $FLUTTER_VERSION ..."
-  git clone --depth 1 --branch "$FLUTTER_VERSION" https://github.com/flutter/flutter.git "$HOME/flutter-sdk"
-  export PATH="$HOME/flutter-sdk/bin:$PATH"
+  echo "Installing Flutter ($FLUTTER_VERSION) ..."
+  rm -rf "$HOME/flutter-sdk"
+  if ! git clone --depth 1 --branch "$FLUTTER_VERSION" https://github.com/flutter/flutter.git "$HOME/flutter-sdk"; then
+    echo "Falling back to Flutter stable branch ..."
+    rm -rf "$HOME/flutter-sdk"
+    git clone --depth 1 --branch stable https://github.com/flutter/flutter.git "$HOME/flutter-sdk"
+  fi
 fi
+
+git config --global --add safe.directory "$HOME/flutter-sdk" || true
 
 flutter --version
 flutter pub get
